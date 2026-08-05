@@ -37,6 +37,7 @@ from sglang.multimodal_gen.runtime.distributed import (
     tensor_model_parallel_all_gather,
 )
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
+from sglang.multimodal_gen.runtime.layers.attention.nvtx import attention_nvtx_range
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -472,33 +473,41 @@ def _minimax_h3_attention_core_impl(
     kernel and sequence-parallel collectives execute eagerly.
     """
 
-    if ulysses_active:
-        from sglang.multimodal_gen.runtime.layers.usp import (
-            _usp_input_all_to_all_packed_qkv,
-            _usp_output_all_to_all,
-        )
-
-        q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
-
-    if attention._attention_impl is None:
-        attention._set_attention_backend(
-            get_attn_backend(
-                attention.head_dim,
-                q.dtype,
-                supported_attention_backends=attention._supported_attention_backends,
+    with attention_nvtx_range("minimax_h3.attention_core"):
+        if ulysses_active:
+            from sglang.multimodal_gen.runtime.layers.usp import (
+                _usp_input_all_to_all_packed_qkv,
+                _usp_output_all_to_all,
             )
-        )
-    out = attention._attention_impl.forward_varlen(
-        q,
-        k,
-        v,
-        cu_seqlens=cu_seqlens,
-        max_seqlen=max_seqlen,
-        cu_seqlens_host=cu_seqlens_host,
-    )
-    if ulysses_active:
-        out = _usp_output_all_to_all(out[None], head_dim=2)[0]
-    return out
+
+            with attention_nvtx_range(
+                "minimax_h3.attention.ulysses_input_all_to_all"
+            ):
+                q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
+
+        if attention._attention_impl is None:
+            attention._set_attention_backend(
+                get_attn_backend(
+                    attention.head_dim,
+                    q.dtype,
+                    supported_attention_backends=attention._supported_attention_backends,
+                )
+            )
+        with attention_nvtx_range("minimax_h3.attention.backend"):
+            out = attention._attention_impl.forward_varlen(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                cu_seqlens_host=cu_seqlens_host,
+            )
+        if ulysses_active:
+            with attention_nvtx_range(
+                "minimax_h3.attention.ulysses_output_all_to_all"
+            ):
+                out = _usp_output_all_to_all(out[None], head_dim=2)[0]
+        return out
 
 
 _minimax_h3_attention_core_bcg = eager_on_graph(True)(_minimax_h3_attention_core_impl)
