@@ -2,8 +2,9 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${SCRIPT_DIR}}"
-VENV="${MINIMAX_H3_VENV:-/workspace/.venvs/sglang-h3}"
+REPO_ROOT="${SGLANG_REPO_ROOT:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)}"
+DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${REPO_ROOT}/artifacts/minimax_h3_sageattention}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:30010}"
 ATTENTION_MODE="${ATTENTION_MODE:-baseline}"
 RUN_TAG="${RUN_TAG:-${ATTENTION_MODE}}"
@@ -99,4 +100,4 @@ if [[ "$(jq -r '.status' "${STATUS_FILE}")" != "completed" ]]; then
 fi
 
 curl -fL "${BASE_URL}/v1/videos/${video_id}/content" -o "${OUTPUT_FILE}"
-"${VENV}/bin/python" "${DEPLOY_ROOT}/inspect-video.py" "${OUTPUT_FILE}"
+"${PYTHON_BIN}" "${SCRIPT_DIR}/inspect_video.py" "${OUTPUT_FILE}"

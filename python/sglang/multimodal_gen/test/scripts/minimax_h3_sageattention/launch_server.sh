@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${SCRIPT_DIR}}"
+REPO_ROOT="${SGLANG_REPO_ROOT:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)}"
+DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${REPO_ROOT}/artifacts/minimax_h3_sageattention}"
 PID_FILE="${DEPLOY_ROOT}/run/server.pid"
 ATTENTION_MODE="${ATTENTION_MODE:-baseline}"
 RUN_TAG="${RUN_TAG:-${ATTENTION_MODE}}"
@@ -19,7 +20,7 @@ if [[ -s "${PID_FILE}" ]]; then
   fi
 fi
 
-nohup setsid "${DEPLOY_ROOT}/start-server.sh" >"${LOG_FILE}" 2>&1 </dev/null &
+nohup setsid "${SCRIPT_DIR}/start_server.sh" >"${LOG_FILE}" 2>&1 </dev/null &
 server_pid=$!
 printf '%s\n' "${server_pid}" >"${PID_FILE}"
 printf '%s\n' "${ATTENTION_MODE}" >"${MODE_FILE}"

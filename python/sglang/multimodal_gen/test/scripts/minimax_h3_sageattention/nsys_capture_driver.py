@@ -12,8 +12,15 @@ import time
 import urllib.request
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(
+    os.environ.get("SGLANG_REPO_ROOT", str(Path(__file__).resolve().parents[6]))
+)
 DEPLOY_ROOT = Path(
-    os.environ.get("MINIMAX_H3_DEPLOY_ROOT", str(Path(__file__).resolve().parent))
+    os.environ.get(
+        "MINIMAX_H3_DEPLOY_ROOT",
+        str(REPO_ROOT / "artifacts" / "minimax_h3_sageattention"),
+    )
 )
 ATTENTION_MODE = os.environ.get("ATTENTION_MODE", "baseline")
 RUN_TAG = os.environ.get("RUN_TAG", f"{ATTENTION_MODE}-nsys")
@@ -31,7 +38,9 @@ def wait_until_ready(server: subprocess.Popen[bytes], log_path: Path) -> None:
     while time.monotonic() < deadline:
         return_code = server.poll()
         if return_code is not None:
-            raise RuntimeError(f"server exited during startup with code {return_code}: {log_path}")
+            raise RuntimeError(
+                f"server exited during startup with code {return_code}: {log_path}"
+            )
 
         if log_path.exists() and ready_message in log_path.read_text(errors="replace"):
             try:
@@ -42,7 +51,9 @@ def wait_until_ready(server: subprocess.Popen[bytes], log_path: Path) -> None:
                 pass
         time.sleep(2)
 
-    raise TimeoutError(f"server did not become ready within {READY_TIMEOUT_SECONDS}s: {log_path}")
+    raise TimeoutError(
+        f"server did not become ready within {READY_TIMEOUT_SECONDS}s: {log_path}"
+    )
 
 
 def stop_server(server: subprocess.Popen[bytes]) -> None:
@@ -71,15 +82,18 @@ def main() -> int:
 
     with log_path.open("wb") as server_log:
         server = subprocess.Popen(
-            [str(DEPLOY_ROOT / "start-server.sh"), "--enable-layerwise-nvtx-marker"],
-            cwd=DEPLOY_ROOT,
+            [str(SCRIPT_DIR / "start_server.sh"), "--enable-layerwise-nvtx-marker"],
+            cwd=REPO_ROOT,
             env=child_env,
             stdout=server_log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         try:
-            print(f"Waiting for warmed {ATTENTION_MODE} server (PID {server.pid})...", flush=True)
+            print(
+                f"Waiting for warmed {ATTENTION_MODE} server (PID {server.pid})...",
+                flush=True,
+            )
             wait_until_ready(server, log_path)
             print(f"Starting nsys capture range: {CAPTURE_RANGE}", flush=True)
 
@@ -101,8 +115,8 @@ def main() -> int:
                     "OUTPUT_FILE": output_file,
                 }
                 result = subprocess.run(
-                    [str(DEPLOY_ROOT / "validate-t2va.sh")],
-                    cwd=DEPLOY_ROOT,
+                    [str(SCRIPT_DIR / "validate_t2va.sh")],
+                    cwd=REPO_ROOT,
                     env=validation_env,
                     check=False,
                 )

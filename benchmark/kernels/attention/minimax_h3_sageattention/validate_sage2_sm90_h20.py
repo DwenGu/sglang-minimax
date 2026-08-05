@@ -11,13 +11,22 @@ from __future__ import annotations
 
 import argparse
 import gc
+import os
 import statistics
 import sys
 from pathlib import Path
 from typing import Callable
 
 
-DEPLOY_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(
+    os.environ.get("SGLANG_REPO_ROOT", str(Path(__file__).resolve().parents[4]))
+)
+DEPLOY_ROOT = Path(
+    os.environ.get(
+        "MINIMAX_H3_DEPLOY_ROOT",
+        str(REPO_ROOT / "artifacts" / "minimax_h3_sageattention"),
+    )
+)
 sys.path.insert(0, str(DEPLOY_ROOT / "sageattention" / "2.2.0"))
 
 import torch  # noqa: E402

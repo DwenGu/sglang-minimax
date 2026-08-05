@@ -2,8 +2,9 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${SCRIPT_DIR}}"
-VENV="${MINIMAX_H3_VENV:-/workspace/.venvs/sglang-h3}"
+REPO_ROOT="${SGLANG_REPO_ROOT:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)}"
+DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${REPO_ROOT}/artifacts/minimax_h3_sageattention}"
+SGLANG_BIN="${SGLANG_BIN:-$(command -v sglang || true)}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-30010}"
 NUM_GPUS="${NUM_GPUS:-8}"
@@ -64,8 +65,8 @@ case "${ATTENTION_MODE}" in
     ;;
 esac
 
-if [[ ! -x "${VENV}/bin/sglang" ]]; then
-  echo "SGLang executable not found: ${VENV}/bin/sglang" >&2
+if [[ -z "${SGLANG_BIN}" || ! -x "${SGLANG_BIN}" ]]; then
+  echo "SGLang executable not found; activate the target environment or set SGLANG_BIN." >&2
   exit 1
 fi
 
@@ -97,7 +98,7 @@ export no_proxy="${no_proxy:+${no_proxy},}127.0.0.1,localhost,0.0.0.0"
 
 echo "MiniMax-H3 attention mode: ${ATTENTION_MODE}"
 
-exec "${VENV}/bin/sglang" serve \
+exec "${SGLANG_BIN}" serve \
   --model-path MiniMaxAI/MiniMax-H3 \
   --model-variant fl2va \
   --num-gpus "${NUM_GPUS}" \

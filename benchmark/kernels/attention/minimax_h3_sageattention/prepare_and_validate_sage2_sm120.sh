@@ -2,8 +2,10 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_VENV="${MINIMAX_H3_VENV:-/workspace/.venvs/sglang-h3}"
-if [[ -x "${DEFAULT_VENV}/bin/python" ]]; then
+REPO_ROOT="${SGLANG_REPO_ROOT:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)}"
+DEPLOY_ROOT="${MINIMAX_H3_DEPLOY_ROOT:-${REPO_ROOT}/artifacts/minimax_h3_sageattention}"
+DEFAULT_VENV="${MINIMAX_H3_VENV:-}"
+if [[ -n "${DEFAULT_VENV}" && -x "${DEFAULT_VENV}/bin/python" ]]; then
   default_python="${DEFAULT_VENV}/bin/python"
 else
   default_python="python3"
@@ -12,14 +14,14 @@ PYTHON_BIN="${PYTHON_BIN:-${default_python}}"
 DEVICE="${DEVICE:-0}"
 SAGEATTN_REPOSITORY="${SAGEATTN_REPOSITORY:-https://github.com/thu-ml/SageAttention.git}"
 SAGEATTN_REF="${SAGEATTN_REF:-v2.2.0}"
-SAGEATTN_SOURCE="${SAGEATTN_SOURCE:-${SCRIPT_DIR}/sageattention/2.2.0}"
+SAGEATTN_SOURCE="${SAGEATTN_SOURCE:-${DEPLOY_ROOT}/sageattention/2.2.0}"
 MAX_JOBS="${MAX_JOBS:-8}"
 
 usage() {
   command_name="$(basename -- "$0")"
   echo "Build SageAttention2 for SM120 and run the MiniMax-H3 exact-shape check."
   echo
-  echo "Usage: ${command_name} [arguments forwarded to validate-sage2-sm120-h3.py]"
+  echo "Usage: ${command_name} [arguments forwarded to validate_sage2_sm120_h3.py]"
   echo
   echo "Environment overrides:"
   echo "  PYTHON_BIN          Python from the target SGLang environment"
@@ -30,13 +32,13 @@ usage() {
   echo "  MAX_JOBS            extension build parallelism (default: 8)"
   echo
   echo "Example:"
-  echo "  PYTHON_BIN=/workspace/.venvs/sglang-h3/bin/python ${command_name} --repeats 10"
+  echo "  PYTHON_BIN=/path/to/sglang-env/bin/python ${command_name} --repeats 10"
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   usage
   echo
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/validate-sage2-sm120-h3.py" --help
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_sage2_sm120_h3.py" --help
   exit 0
 fi
 
@@ -140,11 +142,12 @@ for extension_path in "${extension_paths[@]}"; do
 done
 
 PYTHONPATH="${SAGEATTN_SOURCE}${PYTHONPATH:+:${PYTHONPATH}}" \
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/validate-sage2-sm120-h3.py" \
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_sage2_sm120_h3.py" \
     --device "${DEVICE}" \
     --sageattention-root "${SAGEATTN_SOURCE}" \
     "$@"
 
 echo
 echo "SM120 preflight passed. Start MiniMax-H3 with:"
-echo "  ATTENTION_MODE=sageattention2-sm120 NUM_GPUS=8 ULYSSES_DEGREE=8 ./launch-server.sh"
+echo '  ATTENTION_MODE=sageattention2-sm120 NUM_GPUS=8 ULYSSES_DEGREE=8 \'
+echo "    python/sglang/multimodal_gen/test/scripts/minimax_h3_sageattention/launch_server.sh"

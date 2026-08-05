@@ -280,14 +280,3 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
-
-# MiniMax-H3 SageAttention local deployment artifacts
-hf-cache/
-logs/
-run/
-server-outputs/
-timelines/
-metrics/
-tmp/
-sageattention/
-third_party/

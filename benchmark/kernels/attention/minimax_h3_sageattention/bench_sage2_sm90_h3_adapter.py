@@ -10,14 +10,23 @@ computes the 12-token packed padding interval.
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
 from pathlib import Path
 from typing import Callable
 
 
-DEPLOY_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(DEPLOY_ROOT / "sglang" / "python"))
+REPO_ROOT = Path(
+    os.environ.get("SGLANG_REPO_ROOT", str(Path(__file__).resolve().parents[4]))
+)
+DEPLOY_ROOT = Path(
+    os.environ.get(
+        "MINIMAX_H3_DEPLOY_ROOT",
+        str(REPO_ROOT / "artifacts" / "minimax_h3_sageattention"),
+    )
+)
+sys.path.insert(0, str(REPO_ROOT / "python"))
 sys.path.insert(0, str(DEPLOY_ROOT / "sageattention" / "2.2.0"))
 
 import torch  # noqa: E402
@@ -91,13 +100,9 @@ def main() -> int:
 
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
     shape = (args.total_tokens, args.heads, args.head_dim)
-    query = torch.randn(
-        shape, dtype=torch.bfloat16, device="cuda", generator=generator
-    )
+    query = torch.randn(shape, dtype=torch.bfloat16, device="cuda", generator=generator)
     key = torch.randn(shape, dtype=torch.bfloat16, device="cuda", generator=generator)
-    value = torch.randn(
-        shape, dtype=torch.bfloat16, device="cuda", generator=generator
-    )
+    value = torch.randn(shape, dtype=torch.bfloat16, device="cuda", generator=generator)
     boundaries = (0, args.used_tokens, args.total_tokens)
     cu_seqlens = torch.tensor(boundaries, dtype=torch.int32, device="cuda")
     max_seqlen = max(args.used_tokens, args.total_tokens - args.used_tokens)
@@ -142,9 +147,7 @@ def main() -> int:
         h3_sm90_adapter, args.warmup, args.repeats
     )
 
-    live_cosine = cosine(
-        native_output.squeeze(0), adapter_output[: args.used_tokens]
-    )
+    live_cosine = cosine(native_output.squeeze(0), adapter_output[: args.used_tokens])
     adapter_vs_fused = cosine(adapter_output, fused_output)
     finite = bool(torch.isfinite(adapter_output).all().item())
     overhead = (adapter_median / native_median - 1.0) * 100.0

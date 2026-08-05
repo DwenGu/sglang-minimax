@@ -7,7 +7,7 @@ on tractable sequence lengths.  It then executes the MiniMax-H3 packed layout
 latency and peak memory, and writes a machine-readable JSON result.
 
 Run this only after SageAttention2 has been compiled for ``sm_120``.  The
-companion ``prepare-and-validate-sage2-sm120.sh`` performs that build and calls
+companion ``prepare_and_validate_sage2_sm120.sh`` performs that build and calls
 this script with the correct source path.
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import re
 import statistics
 import sys
@@ -27,7 +28,15 @@ import torch
 import torch.nn.functional as F
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(
+    os.environ.get("SGLANG_REPO_ROOT", str(Path(__file__).resolve().parents[4]))
+)
+DEPLOY_ROOT = Path(
+    os.environ.get(
+        "MINIMAX_H3_DEPLOY_ROOT",
+        str(REPO_ROOT / "artifacts" / "minimax_h3_sageattention"),
+    )
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--json-output",
         type=Path,
-        default=SCRIPT_DIR / "run" / "sm120-h3-validation.json",
+        default=DEPLOY_ROOT / "run" / "sm120-h3-validation.json",
     )
     parser.add_argument(
         "--allow-missing-torch-sm120-arch",
