@@ -77,15 +77,27 @@ def _sage2_h3_sm90_cuda_enabled() -> bool:
     return value in {"1", "true"}
 
 
-def _sageattention_nvtx_enabled() -> bool:
-    value = os.getenv(
-        "SGLANG_DIFFUSION_ATTENTION_NVTX",
-        os.getenv("SGLANG_SAGEATTENTION_NVTX", "0"),
-    ).strip().lower()
+def _sage2_h3_sm120_cuda_enabled() -> bool:
+    value = os.getenv("SGLANG_SAGEATTENTION_SM120_CUDA", "0").strip().lower()
     if value not in {"0", "1", "false", "true"}:
         raise RuntimeError(
-            "SGLANG_DIFFUSION_ATTENTION_NVTX must be 0/1/false/true; "
-            f"got {value!r}"
+            f"SGLANG_SAGEATTENTION_SM120_CUDA must be 0/1/false/true; got {value!r}"
+        )
+    return value in {"1", "true"}
+
+
+def _sageattention_nvtx_enabled() -> bool:
+    value = (
+        os.getenv(
+            "SGLANG_DIFFUSION_ATTENTION_NVTX",
+            os.getenv("SGLANG_SAGEATTENTION_NVTX", "0"),
+        )
+        .strip()
+        .lower()
+    )
+    if value not in {"0", "1", "false", "true"}:
+        raise RuntimeError(
+            f"SGLANG_DIFFUSION_ATTENTION_NVTX must be 0/1/false/true; got {value!r}"
         )
     return value in {"1", "true"}
 
@@ -123,6 +135,7 @@ class SageAttentionImpl(AttentionImpl):
         self.variant = _sageattention_variant()
         self.use_h3_fused_varlen = False
         self.use_h3_sm90_cuda = False
+        self.use_h3_sm120_cuda = False
         self.use_nvtx = _sageattention_nvtx_enabled()
         if self.variant == "2":
             try:
@@ -135,6 +148,12 @@ class SageAttentionImpl(AttentionImpl):
             self._sageattn2 = sageattn_qk_int8_pv_fp16_triton
             self.use_h3_fused_varlen = _sage2_h3_fused_enabled()
             self.use_h3_sm90_cuda = _sage2_h3_sm90_cuda_enabled()
+            self.use_h3_sm120_cuda = _sage2_h3_sm120_cuda_enabled()
+            if self.use_h3_sm90_cuda and self.use_h3_sm120_cuda:
+                raise RuntimeError(
+                    "SGLANG_SAGEATTENTION_SM90_CUDA and "
+                    "SGLANG_SAGEATTENTION_SM120_CUDA are mutually exclusive"
+                )
         logger.info_once(
             f"Using SageAttention{self.variant} for diffusion attention "
             f"(head_size={head_size})"
@@ -146,6 +165,10 @@ class SageAttentionImpl(AttentionImpl):
         if self.use_h3_sm90_cuda:
             logger.info_once(
                 "Using the native SageAttention2 SM90 CUDA kernel for MiniMax-H3"
+            )
+        if self.use_h3_sm120_cuda:
+            logger.info_once(
+                "Using the SageAttention2 SM120 CUDA dispatcher for MiniMax-H3"
             )
 
     def forward(
@@ -189,9 +212,7 @@ class SageAttentionImpl(AttentionImpl):
         cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         if self.variant == "1":
-            with _profile_range(
-                "sageattention1.varlen", nvtx_enabled=self.use_nvtx
-            ):
+            with _profile_range("sageattention1.varlen", nvtx_enabled=self.use_nvtx):
                 return sageattn_varlen(
                     query,
                     key,
@@ -202,6 +223,38 @@ class SageAttentionImpl(AttentionImpl):
                     max_seqlen,
                     is_causal=self.causal,
                     sm_scale=self.softmax_scale,
+                )
+
+        if self.use_h3_sm120_cuda:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn_h3_sm120 import (
+                is_supported as is_sm120_supported,
+                sageattn2_h3_sm120_cuda,
+            )
+
+            if is_sm120_supported(
+                query,
+                key,
+                value,
+                is_causal=self.causal,
+                cu_seqlens_host=cu_seqlens_host,
+            ):
+                with _profile_range(
+                    "sageattention2.h3_sm120_cuda", nvtx_enabled=self.use_nvtx
+                ):
+                    return sageattn2_h3_sm120_cuda(
+                        query,
+                        key,
+                        value,
+                        cu_seqlens_host=cu_seqlens_host,
+                        sm_scale=self.softmax_scale,
+                    )
+            if query.is_cuda and torch.cuda.get_device_capability(query.device) == (
+                12,
+                0,
+            ):
+                raise RuntimeError(
+                    "MiniMax-H3 tensors do not satisfy the SM120 CUDA adapter "
+                    "contract; refusing to fall back to SageAttention2 Triton varlen"
                 )
 
         if self.use_h3_sm90_cuda:
@@ -249,9 +302,7 @@ class SageAttentionImpl(AttentionImpl):
 
         # Preserve upstream SageAttention2 as a safe fallback for unsupported
         # shapes/dtypes and for A/B validation with the fusion disabled.
-        with _profile_range(
-            "sageattention2.varlen", nvtx_enabled=self.use_nvtx
-        ):
+        with _profile_range("sageattention2.varlen", nvtx_enabled=self.use_nvtx):
             return sageattn_varlen(
                 query,
                 key,

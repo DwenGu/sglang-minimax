@@ -17,11 +17,13 @@ case "${ATTENTION_MODE}" in
   baseline)
     unset SGLANG_SAGEATTENTION_VARIANT
     unset SGLANG_SAGEATTENTION_SM90_CUDA
+    unset SGLANG_SAGEATTENTION_SM120_CUDA
     ;;
   sageattention1)
     export PYTHONPATH="${DEPLOY_ROOT}/sageattention/1.0.6${PYTHONPATH:+:${PYTHONPATH}}"
     export SGLANG_SAGEATTENTION_VARIANT=1
     unset SGLANG_SAGEATTENTION_SM90_CUDA
+    unset SGLANG_SAGEATTENTION_SM120_CUDA
     attention_args=(--attention-backend sage_attn)
     ;;
   sageattention2)
@@ -30,6 +32,7 @@ case "${ATTENTION_MODE}" in
     # This mode is the H3 Triton path even if the parent shell previously
     # exported the CUDA opt-in. Use sageattention2-cuda explicitly for SM90.
     export SGLANG_SAGEATTENTION_SM90_CUDA=0
+    export SGLANG_SAGEATTENTION_SM120_CUDA=0
     # Enable the opt-in H20/MiniMax-H3 fused varlen path. Set this to 0 to
     # retain the upstream SageAttention2 implementation for A/B validation.
     export SGLANG_SAGEATTENTION_FUSED_VARLEN="${SGLANG_SAGEATTENTION_FUSED_VARLEN:-1}"
@@ -39,13 +42,24 @@ case "${ATTENTION_MODE}" in
     export PYTHONPATH="${DEPLOY_ROOT}/sageattention/2.2.0${PYTHONPATH:+:${PYTHONPATH}}"
     export SGLANG_SAGEATTENTION_VARIANT=2
     export SGLANG_SAGEATTENTION_SM90_CUDA=1
+    export SGLANG_SAGEATTENTION_SM120_CUDA=0
     # Keep the fused Triton path enabled as a safe fallback for any input that
     # does not satisfy the H3 SM90 CUDA adapter contract.
     export SGLANG_SAGEATTENTION_FUSED_VARLEN=1
     attention_args=(--attention-backend sage_attn)
     ;;
+  sageattention2-sm120)
+    export PYTHONPATH="${DEPLOY_ROOT}/sageattention/2.2.0${PYTHONPATH:+:${PYTHONPATH}}"
+    export SGLANG_SAGEATTENTION_VARIANT=2
+    export SGLANG_SAGEATTENTION_SM90_CUDA=0
+    export SGLANG_SAGEATTENTION_SM120_CUDA=1
+    # Both H3 fused and upstream varlen use Triton. Do not use either as an
+    # implicit SM120 fallback; the adapter fails closed on contract mismatch.
+    export SGLANG_SAGEATTENTION_FUSED_VARLEN=0
+    attention_args=(--attention-backend sage_attn)
+    ;;
   *)
-    echo "ATTENTION_MODE must be baseline, sageattention1, sageattention2, or sageattention2-cuda; got ${ATTENTION_MODE}" >&2
+    echo "ATTENTION_MODE must be baseline, sageattention1, sageattention2, sageattention2-cuda, or sageattention2-sm120; got ${ATTENTION_MODE}" >&2
     exit 1
     ;;
 esac
