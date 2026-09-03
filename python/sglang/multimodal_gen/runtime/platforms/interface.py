@@ -48,6 +48,7 @@ class AttentionBackendEnum(enum.Enum):
     SOL_ATTN = enum.auto()
     SUBBLOCK_SPARSE_ATTN = enum.auto()
     CUBE_SPARSE_ATTN = enum.auto()
+    ULYSSES_LOWP_V2G = enum.auto()
     NO_ATTENTION = enum.auto()
 
     def __str__(self):

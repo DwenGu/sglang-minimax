@@ -1,10 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from dataclasses import dataclass, field
 
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
+
+
+def minimax_h3_packed_sequence_alignment() -> int:
+    """Multiple the packed sequence length is padded to (zero-filled tail).
+
+    Defaults to ``MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT``.  The environment
+    variable ``SGLANG_MINIMAX_H3_PACKED_ALIGNMENT`` overrides it: with the
+    ``ulysses_lowp_v2g`` attention backend, ``128 * ulysses_degree`` makes
+    every sequence-parallel shard a whole number of 128-token blocks and
+    routes the low-precision Ulysses exchange to its ALIGN-128 fast path
+    (see ``flashinfer.comm.ulysses_lowp.required_alignment``).  Read per call
+    so every rank -- and the BCG padder -- sees one value.
+    """
+
+    value = os.environ.get("SGLANG_MINIMAX_H3_PACKED_ALIGNMENT")
+    if not value:
+        return MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+    alignment = int(value)
+    if alignment <= 0 or alignment % MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT:
+        raise ValueError(
+            "SGLANG_MINIMAX_H3_PACKED_ALIGNMENT must be a positive multiple of "
+            f"{MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT}, got {value!r}"
+        )
+    return alignment
 
 
 @dataclass
@@ -139,5 +164,6 @@ __all__ = [
     "MINIMAX_H3_ADALN_MODALITY_NUM",
     "MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT",
     "MiniMaxH3DiTArchConfig",
+    "minimax_h3_packed_sequence_alignment",
     "MiniMaxH3DiTConfig",
 ]

@@ -34,7 +34,6 @@ from sglang.kernels.ops.layernorm.norm import fused_inplace_qknorm
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MINIMAX_H3_ADALN_MODALITY_NUM,
-    MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
     MiniMaxH3DiTArchConfig,
     MiniMaxH3DiTConfig,
 )
@@ -617,17 +616,6 @@ def _minimax_h3_attention_core_impl(
     kernel and sequence-parallel collectives execute eagerly.
     """
 
-    if ulysses_active:
-        from sglang.multimodal_gen.runtime.layers.usp import (
-            _usp_input_all_to_all,
-            _usp_input_all_to_all_packed_qkv,
-            _usp_output_all_to_all,
-        )
-
-        q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
-        if gate_compress is not None:
-            gate_compress = _usp_input_all_to_all(gate_compress[None], head_dim=2)[0]
-
     if attention._attention_impl is None:
         attention._set_attention_backend(
             get_attn_backend(
@@ -637,6 +625,31 @@ def _minimax_h3_attention_core_impl(
                 attention_requirements=AttentionRequirements(packed_varlen=True),
             )
         )
+
+    if ulysses_active:
+        from sglang.multimodal_gen.runtime.layers.usp import (
+            _usp_input_all_to_all,
+            _usp_input_all_to_all_packed_qkv,
+            _usp_output_all_to_all,
+        )
+
+        # A backend that quantizes BEFORE the sequence->head exchange owns the
+        # input all-to-all itself (low-precision Ulysses A2A).  It sees the
+        # pre-exchange [s_local, h, d] views and returns the post-exchange
+        # attention output, or None to take the regular path below.
+        ulysses_forward = getattr(
+            attention._attention_impl, "forward_varlen_ulysses", None
+        )
+        if ulysses_forward is not None and not ring_active and gate_compress is None:
+            out = ulysses_forward(
+                q, k, v, cu_seqlens_host=cu_seqlens_host, max_seqlen=max_seqlen
+            )
+            if out is not None:
+                return _usp_output_all_to_all(out[None], head_dim=2)[0]
+
+        q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
+        if gate_compress is not None:
+            gate_compress = _usp_input_all_to_all(gate_compress[None], head_dim=2)[0]
 
     if attention._attention_backend_enum is AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3:
         attn_metadata = (
@@ -1974,11 +1987,16 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # constraint; the packed sequence alignment constant must still
         # divide the *combined* sequence-parallel size, since ring adds an
         # outer row split on top of Ulysses's inner one (see forward()).
+        from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
+            minimax_h3_packed_sequence_alignment,
+        )
+
         sp_size = ulysses_size * ring_size
-        if MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT % sp_size:
+        alignment = minimax_h3_packed_sequence_alignment()
+        if alignment % sp_size:
             raise ValueError(
                 "MiniMax H3 packed sequence alignment "
-                f"{MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT} must be divisible by "
+                f"{alignment} must be divisible by "
                 f"the combined sequence-parallel size {sp_size} "
                 f"(ulysses={ulysses_size} x ring={ring_size}). Choose degrees "
                 "whose product divides both the TP-local attention heads and "

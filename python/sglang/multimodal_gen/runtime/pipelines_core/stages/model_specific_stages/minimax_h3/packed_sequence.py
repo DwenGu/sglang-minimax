@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
-    MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
+    minimax_h3_packed_sequence_alignment,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.task_profiles import (
     MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES,
@@ -146,11 +146,8 @@ def minimax_h3_packed_sequence(
     video_rows = latent_t * frame_rows
     audio_rows = audio_t * audio_channel
     used = text_len + cond_rows + audio_rows + video_rows
-    seq_len = (
-        (used + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-        // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-    )
+    alignment = minimax_h3_packed_sequence_alignment()
+    seq_len = (used + alignment - 1) // alignment * alignment
 
     text_sl = slice(0, text_len)
     cond_sl = slice(text_len, text_len + cond_rows)
@@ -384,11 +381,8 @@ def minimax_h3_packed_sequence_ref2va_blocks(
     ref_rows = ref_visual_rows + ref_audio_rows
     used = text_len + keyframe_rows + ref_rows + audio_rows + video_rows
     if seq_len is None:
-        seq_len = (
-            (used + MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT - 1)
-            // MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-            * MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-        )
+        alignment = minimax_h3_packed_sequence_alignment()
+        seq_len = (used + alignment - 1) // alignment * alignment
     if seq_len < used:
         raise ValueError(f"seq_len {seq_len} < used rows {used}")
 

@@ -144,6 +144,40 @@ class _SlidingTileAttentionBackendResolver(_CudaAttentionBackendResolver):
             ) from e
 
 
+class _UlyssesLowpV2GBackendResolver(_CudaAttentionBackendResolver):
+    """Low-precision Ulysses A2A for MiniMax-H3 on SM120: quantization from
+    flashinfer.comm.ulysses_lowp, attention from stock SageAttention's SM89
+    binding.  Falls back to plain SageAttention2 when either is missing."""
+
+    backend = AttentionBackendEnum.ULYSSES_LOWP_V2G
+
+    @classmethod
+    def resolve(cls, platform) -> str | AttentionBackendEnum:
+        if not platform.is_sm120():
+            logger.info(
+                "ulysses_lowp_v2g requires an SM120 device. Falling back to Sage Attention."
+            )
+            return AttentionBackendEnum.SAGE_ATTN
+        try:
+            import flashinfer.comm.ulysses_lowp as lowp
+            from sageattention import _qattn_sm89  # noqa: F401
+
+            if lowp.ABI_VERSION != 3 or not lowp.capability("cuda").get("supported"):
+                raise ImportError(
+                    "flashinfer.comm.ulysses_lowp payload ABI v3 unsupported"
+                )
+            from sglang.multimodal_gen.runtime.layers.attention.backends.ulysses_lowp_v2g import (  # noqa: F401
+                UlyssesLowpV2GBackend,
+            )
+        except ImportError as exc:
+            logger.info(
+                "ulysses_lowp_v2g backend unavailable (%s). Falling back to Sage Attention.",
+                exc,
+            )
+            return AttentionBackendEnum.SAGE_ATTN
+        return "sglang.multimodal_gen.runtime.layers.attention.backends.ulysses_lowp_v2g.UlyssesLowpV2GBackend"
+
+
 class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN
 
@@ -475,6 +509,7 @@ _CUDA_ATTENTION_BACKEND_RESOLVERS = {
         _SolAttnBackendResolver,
         _VMOBAAttentionBackendResolver,
         _SubBlockSparseAttentionBackendResolver,
+        _UlyssesLowpV2GBackendResolver,
         _FlashAttention2BackendResolver,
         _FlashAttentionBackendResolver,
     )

@@ -10,7 +10,7 @@ from typing import Any
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
-    MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
+    minimax_h3_packed_sequence_alignment,
 )
 from sglang.multimodal_gen.runtime.breakable_cuda_graph import (
     prompt_padding as bcg_utils,
@@ -62,7 +62,7 @@ def _replace_psp(
 
 
 def _aligned(value: int) -> int:
-    alignment = MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
+    alignment = minimax_h3_packed_sequence_alignment()
     return (value + alignment - 1) // alignment * alignment
 
 
