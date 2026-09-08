@@ -162,7 +162,7 @@ class _UlyssesLowpV2GBackendResolver(_CudaAttentionBackendResolver):
             import flashinfer.comm.ulysses_lowp as lowp
             from sageattention import _qattn_sm89  # noqa: F401
 
-            if lowp.ABI_VERSION != 3 or not lowp.capability("cuda").get("supported"):
+            if not lowp.capability("cuda").get("supported"):
                 raise ImportError(
                     "flashinfer.comm.ulysses_lowp payload ABI v3 unsupported"
                 )
