@@ -52,6 +52,81 @@ _WORLD_SIZES = (2, 4, 8)
 _SAGE_NHD, _SAGE_NON_CAUSAL, _SAGE_PER_WARP, _SAGE_NO_LSE = 0, 0, 2, 0
 
 
+# --- SM90 (Hopper) wiring, deployment doc 7.3 -------------------------------
+# The module-level flashinfer API is SM120/SM89-only (its capability() whitelist
+# is {(8,9),(12,0)} and _require_sm89_or_sm120() raises on (9,0)).  SM90 has its
+# own JIT module and its own layout class, so dispatch on device capability and
+# route every call through the matching layout object.
+#
+# Two things the layout classes do NOT inherit from the module-level API:
+#   * payload_spec()/unpack_for_sage() take no ``head_dim`` kwarg
+#   * neither class exposes ``scale_widths``; the SM90 widths live inline in
+#     UlyssesLowpSageLayoutSM90.unpack_for_sage (ulysses_lowp.py:2335-2336).
+#     SM120 is (ceil(s/128)*4, ceil(s/64)); SM90 is (ceil(s/64)*4, ceil(s/128)).
+#     Getting it wrong is caught: the .cu shape-checks the out= scale tensors
+#     ("q_scale has shape (1, 4, 16), expected (1, 4, 32)"), as does
+#     SageAttention's own CHECK_SHAPE. It still has to be per-arch here
+#     because neither layout class exposes the rule.
+_SM90 = (9, 0)
+
+
+def _sm120_scale_widths(sequence: int) -> tuple[int, int]:
+    # Delegate so SM120 keeps the module function's positive-int guard and stays
+    # correct if the upstream formula ever changes.
+    return lowp.scale_widths(sequence)
+
+
+def _sm90_scale_widths(sequence: int) -> tuple[int, int]:
+    if not isinstance(sequence, int) or sequence <= 0:
+        raise ValueError("sequence must be a positive integer")
+    return (sequence + 63) // 64 * 4, (sequence + 127) // 128
+
+
+class _ArchOps:
+    """Layout object + scale-width rule + SageAttention entry for one arch."""
+
+    __slots__ = ("layout", "scale_widths", "attn", "name")
+
+    def __init__(self, layout, scale_widths, attn, name):
+        self.layout = layout
+        self.scale_widths = scale_widths
+        self.attn = attn
+        self.name = name
+
+
+_ARCH_OPS: _ArchOps | None = None
+
+
+def _arch_ops() -> _ArchOps | None:
+    """Resolve once, lazily -- import time is too early to touch CUDA."""
+    global _ARCH_OPS
+    if _ARCH_OPS is None:
+        if torch.cuda.get_device_capability() == _SM90:
+            # Imported here, not at module scope: SageAttention only builds
+            # _qattn_sm90 when TORCH_CUDA_ARCH_LIST includes 9.0 (setup.py:204),
+            # so a top-level import would make this whole module unimportable on
+            # SM120 -- which the resolver would swallow as a silent fallback.
+            from sageattention import _qattn_sm90
+
+            _ARCH_OPS = _ArchOps(
+                lowp.UlyssesLowpSageLayoutSM90(),
+                _sm90_scale_widths,
+                # SageAttention's SM90 binding has no f16-accum variant; the f32
+                # one has the identical 12-argument signature and accumulates
+                # more precisely.
+                _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf,
+                "sm90",
+            )
+        else:
+            _ARCH_OPS = _ArchOps(
+                lowp.UlyssesLowpSageLayout(),
+                _sm120_scale_widths,
+                _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf,
+                "sm120",
+            )
+    return _ARCH_OPS
+
+
 class UlyssesLowpV2GBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -136,6 +211,8 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
                 )
             return None
         world_size, rank, used = route
+        ops = _arch_ops()
+        layout = ops.layout
         local_sequence, num_heads, head_dim = q.shape
         local_heads = num_heads // world_size
         global_sequence = local_sequence * world_size
@@ -143,7 +220,7 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
         q4, k4, v4 = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
 
         with torch.cuda.nvtx.range("lowp_local_stats"):
-            send, ctx = lowp.local_stats(
+            send, ctx = layout.local_stats(
                 q4, k4, v4, rank=rank, world_size=world_size, used_sequence=used
             )
             gathered = _a2a_staging_buffer(
@@ -154,13 +231,12 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
                 gathered, send, group=get_sp_group().ulysses_group
             )
         with torch.cuda.nvtx.range("lowp_finalize_stats"):
-            stats = lowp.finalize_stats(gathered, ctx, k4)
+            stats = layout.finalize_stats(gathered, ctx, k4)
 
-        spec = lowp.payload_spec(
+        spec = layout.payload_spec(
             batch_size=1,
             local_sequence=local_sequence,
             num_heads=num_heads,
-            head_dim=head_dim,
             world_size=world_size,
         )
         with torch.cuda.nvtx.range("lowp_quant_pack"):
@@ -170,12 +246,12 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
                 torch.uint8,
                 device,
             )
-            lowp.quant_and_pack(q4, k4, v4, stats, out=send_u8)
+            layout.quant_and_pack(q4, k4, v4, stats, out=send_u8)
         with torch.cuda.nvtx.range("lowp_input_a2a"):
             recv_u8 = _usp_all_to_all_single(send_u8, role="lowp_qkv_recv")
 
         with torch.cuda.nvtx.range("lowp_unpack"):
-            q_width, k_width = lowp.scale_widths(used)
+            q_width, k_width = ops.scale_widths(used)
             q_int8 = _a2a_staging_buffer(
                 "lowp_q_global",
                 (1, global_sequence, local_heads, head_dim),
@@ -200,12 +276,11 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
             k_scale = _a2a_staging_buffer(
                 "lowp_k_scale", (1, local_heads, k_width), torch.float32, device
             )
-            lowp.unpack_for_sage(
+            layout.unpack_for_sage(
                 recv_u8,
                 batch_size=1,
                 local_sequence=local_sequence,
                 local_heads=local_heads,
-                head_dim=head_dim,
                 world_size=world_size,
                 aligned=None,
                 scale_sequence=used,
@@ -225,7 +300,7 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
             )
             if used < global_sequence:
                 out[:, used:].zero_()
-            _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf(
+            ops.attn(
                 q_int8[:, :used],
                 k_int8[:, :used],
                 v_fp8,
