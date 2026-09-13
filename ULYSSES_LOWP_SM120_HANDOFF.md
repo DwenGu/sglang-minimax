@@ -2,12 +2,27 @@
 
 日期：2026-09-13。本文汇总实现、提交分支、运行脚本、最新 SM90 视频与 timeline 结果，以及 SM120 验证步骤。SM120 GPU 验收由使用者执行；下文的性能数字全部来自 SM90，不能当作 SM120 的预期收益。
 
+路径约定：所有命令均从你选择的**项目根目录**执行，项目可以位于任意磁盘位置。三个代码仓库、模型、结果和临时目录均按下列相对位置组织；只有单测在子 shell 中进入 FlashInfer，退出后仍回到项目根目录。
+
+```text
+./
+  flashinfer/
+  sglang-lowp-fi/
+  SageAttention-stock/
+  models/MiniMax-H3/
+  reference-sm90/
+  results-sm120-up8/
+  work-sm120-up8/
+  sm120-gate-work/
+  tools/nsys.deb
+```
+
 ## 1. 分支与可复现版本
 
 | 仓库 | 分支 | 本次执行代码快照 |
 |---|---|---|
 | [DwenGu/flashinfer](https://github.com/DwenGu/flashinfer/tree/feat/ulysses-lowp-sage2) | `feat/ulysses-lowp-sage2` | `1c8283228b97c1ce575cf3815d822f640eb40e4f` |
-| [DwenGu/sglang-minimax](https://github.com/DwenGu/sglang-minimax/tree/feat/minimax-h3-ulysses-lowp-boundary-first) | `feat/minimax-h3-ulysses-lowp-boundary-first` | `d6654000274cb20ba6c1a29cbbb31c94d01f4fd1` |
+| [DwenGu/sglang-minimax](https://github.com/DwenGu/sglang-minimax/tree/feat/minimax-h3-ulysses-lowp-boundary-first) | `feat/minimax-h3-ulysses-lowp-boundary-first` | `04843634e03928da0f4c9de91eb76a001e311216` |
 | [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention/tree/d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5) | 固定版本，未修改 | `d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5`，包版本 2.2.0 |
 
 SGLang 分支在执行快照之后只更新本交接文档；执行代码以表中的 SHA 为准。此前按 isort 规范补充的一个 import 分组空行已确认不改变 Python AST。两个功能分支保留已有功能历史，不覆盖 main，也没有合入 main 后续无关更新。FlashInfer 基于此前 `481cb83a`，SGLang 基于此前 `6215b598e`。
@@ -20,6 +35,7 @@ SGLang 分支在执行快照之后只更新本交接文档；执行代码以表�
 | SGLang `72e138983` | 可移植视频请求、50/3-step 采集、SM90/SM120 NVTX 路由与功能分类分析脚本 |
 | SGLang `05f52857d` | 中文交接手册与 import 分组空行 |
 | SGLang `d66540002` | 预检放到子进程，避免协调进程持有 CUDA 上下文、阻塞 GPU 清理 |
+| SGLang `04843634e` | 相对模型路径按启动目录解析，默认模型位置改为项目内路径；补充相对路径回归 |
 
 提交前确认：FlashInfer 完整提交及 SGLang `3b5450de6` 相对于原 HEAD 的既有 tracked diff，与最新 SM90 视频报告记录的 SHA-256 一致。FlashInfer 为 `e3757e774aede56e561a1d833a4d0ce91525cc803cc32638f6d70d1064952094`，SGLang 为 `463dd2e8857b82a0644e21769a16869661879e67abfefe21abad217a49fadbc2`。该比较排除了当时尚未跟踪的两个新增测试/验收文件；生产修改与视频批次相同。新增的移植采集脚本另做了路由与解析验证，未宣称已在 SM120 跑通。
 
@@ -67,19 +83,19 @@ payload 每个目的 rank 一段：Q INT8、K INT8、V FP8、Q/K FP32 scales，�
 
 当前参考基线为 2026-09-11 重构后的 UP8 批次，Sage2 视频和 trace 都使用 **CUDA per-warp**。不要使用父目录中历史 Triton per-thread Sage2 视频作为当前基线。
 
-原 SM90 主机目录：
+原 SM90 项目根目录下的相对位置：
 
 ```text
-/raid/jungu/H3-A2A/deliverables/h3-up4-up8-seed2101/up8-validation/
+./deliverables/h3-up4-up8-seed2101/up8-validation/
   REPORT.html / REPORT.md
   videos/case{1,2,3}_up8_{bf16,sage2,lowp}_50steps.mp4
   timelines/case1_up8_{bf16,sage2,lowp}_3steps.nsys-rep
 ```
 
-共 9 个视频、3 份 timeline。原始媒体没有放入 Git；Git 分支提供代码、脚本和本手册。迁移时将上述完整目录复制为新机器的 `/workspace/reference-sm90/`，即可保留离线 HTML 的全部视频与 trace 链接。例如在 SM120 主机执行，替换实际主机名和目标工作区路径：
+共 9 个视频、3 份 timeline。原始媒体没有放入 Git；Git 分支提供代码、脚本和本手册。迁移时将上述完整目录复制为新项目根目录下的 `./reference-sm90/`，即可保留离线 HTML 的全部视频与 trace 链接。例如从 SM120 项目根目录执行，替换实际主机名及相对于远端登录目录的项目位置（示例为 `H3-A2A`）：
 
 ```bash
-rsync -av SM90_HOST:/raid/jungu/H3-A2A/deliverables/h3-up4-up8-seed2101/up8-validation/ /raid/h3-sm120/reference-sm90/
+rsync -av SM90_HOST:H3-A2A/deliverables/h3-up4-up8-seed2101/up8-validation/ ./reference-sm90/
 ```
 
 固定配置：8×H20-3e、UP8/TP1、ring=1、FSDP OFF、AdaLN online/offload ON、compile OFF；MiniMax-H3 FL2VA、speed、704p、16:9、请求 5 秒、seed=2101、flow shift=12、audio flow shift=3。实际视频为 1248×704、24fps、124 帧，约 5.17 秒。视频请求 **50 timesteps，实际 49 次 denoise 更新**；性能请求 **3 timesteps，实际 2 次更新**。不要把参数改成 4 来凑 3 次更新。
@@ -148,31 +164,31 @@ rsync -av SM90_HOST:/raid/jungu/H3-A2A/deliverables/h3-up4-up8-seed2101/up8-vali
 
 E2E 脚本固定使用 8 张同构可见 GPU：UP8/TP1 为默认，UP4/TP2 为可选。先确认 GPU 空闲、显存能承载 FSDP OFF 的 MiniMax-H3，保存 `nvidia-smi` 和 `nvidia-smi topo -m` 到最终报告。SM120 的互联拓扑与 H20 不同，不能要求相同通信收益。不要为跑通而静默开启 FSDP、关闭 AdaLN online 或改分辨率。
 
-宿主机准备独立工作区和已有模型目录，例如 `/raid/h3-sm120`、`/raid/models/MiniMax-H3`。以下容器基线与 SM90 相同；模型权重需自行准备：
+先在宿主机进入选定的项目根目录，并将模型准备在 `./models/MiniMax-H3/`。以下容器基线与 SM90 相同。Docker 的 bind mount 要求绝对形式，因此只在挂载时通过 `pwd` 自动取得当前目录，不写死机器路径；容器启动后已经位于同一项目根目录：
 
 ```bash
-mkdir -p /raid/h3-sm120
+test -d ./models/MiniMax-H3
+H3_ROOT="$(pwd -P)"
 H3_IMAGE=lmsysorg/sglang@sha256:9e148f5ac788e856a06166bd6347a831831eb9fcfab4d1770874823a7c29a1a1
 docker pull "$H3_IMAGE"
 docker run -it --name h3-sm120 --gpus all --ipc=host --network=host \
   --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-  -v /raid/h3-sm120:/workspace \
-  -v /raid/models/MiniMax-H3:/models/MiniMax-H3:ro \
-  -w /workspace "$H3_IMAGE" bash
+  -v "$H3_ROOT:$H3_ROOT" \
+  -v "$H3_ROOT/models/MiniMax-H3:$H3_ROOT/models/MiniMax-H3:ro" \
+  -w "$H3_ROOT" "$H3_IMAGE" bash
 ```
 
 以下在容器内执行。代码快照固定，避免安装时隐式升级 Torch/CUDA：
 
 ```bash
 set -euo pipefail
-cd /workspace
 git clone --branch feat/ulysses-lowp-sage2 https://github.com/DwenGu/flashinfer.git flashinfer
 git -C flashinfer checkout 1c8283228b97c1ce575cf3815d822f640eb40e4f
 git -C flashinfer submodule update --init --recursive
 
 git clone --branch feat/minimax-h3-ulysses-lowp-boundary-first https://github.com/DwenGu/sglang-minimax.git sglang-lowp-fi
 # 保留分支最新手册，同时核验其他文件与固定快照相同。
-git -C sglang-lowp-fi diff --exit-code d6654000274cb20ba6c1a29cbbb31c94d01f4fd1 HEAD -- . ':!ULYSSES_LOWP_SM120_HANDOFF.md'
+git -C sglang-lowp-fi diff --exit-code 04843634e03928da0f4c9de91eb76a001e311216 HEAD -- . ':!ULYSSES_LOWP_SM120_HANDOFF.md'
 
 git clone https://github.com/thu-ml/SageAttention.git SageAttention-stock
 git -C SageAttention-stock checkout d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
@@ -181,9 +197,9 @@ export TORCH_CUDA_ARCH_LIST="12.0"
 export FLASHINFER_CUDA_ARCH_LIST="12.0"
 export MAX_JOBS=4
 export FLASHINFER_NVCC_THREADS=4
-python -m pip install --no-deps --no-build-isolation -e /workspace/flashinfer
-python -m pip install --no-deps --no-build-isolation -e /workspace/SageAttention-stock
-python -m pip install --no-deps --no-build-isolation -e /workspace/sglang-lowp-fi/python
+python -m pip install --no-deps --no-build-isolation -e ./flashinfer
+python -m pip install --no-deps --no-build-isolation -e ./SageAttention-stock
+python -m pip install --no-deps --no-build-isolation -e ./sglang-lowp-fi/python
 python -m pip install pytest
 apt-get update
 apt-get install -y ffmpeg
@@ -191,11 +207,13 @@ apt-get install -y ffmpeg
 
 SM90 已测工具链是 PyTorch 2.13.0+cu130、CUDA 13.0、driver 580.95.05、FlashInfer 0.6.18、SageAttention 2.2.0。新机器必须打印实际版本，不把镜像标签当作已验证环境。Sage 的这版 setup 支持 `TORCH_CUDA_ARCH_LIST=12.0`；SM120 编译要求 CUDA ≥12.8。不要复制 H20 生成的 `.so` 或 JIT cache。
 
-Nsight Systems 是本次在容器内额外安装的工具，不能假设基础镜像已经包含。准备 **2026.4.1 Linux x86_64 CLI** 安装包到 `/workspace/tools/nsys.deb`，按 [NVIDIA 下载入口](https://developer.nvidia.com/nsight-systems/get-started)和[安装说明](https://docs.nvidia.com/nsight-systems/InstallationGuide/)获取，然后执行：
+Nsight Systems 是本次在容器内额外安装的工具，不能假设基础镜像已经包含。准备 **2026.4.1 Linux x86_64 CLI** 安装包到 `./tools/nsys.deb`，按 [NVIDIA 下载入口](https://developer.nvidia.com/nsight-systems/get-started)和[安装说明](https://docs.nvidia.com/nsight-systems/InstallationGuide/)获取，然后执行：
 
 ```bash
-apt-get install -y /workspace/tools/nsys.deb
-export PATH=/opt/nvidia/nsight-systems-cli/2026.4.1/target-linux-x64:$PATH
+apt-get install -y ./tools/nsys.deb
+NSYS_BIN="$(dpkg -L nsight-systems-cli-2026.4.1 | grep '/target-linux-x64/nsys$')"
+test -x "$NSYS_BIN"
+export PATH="$(dirname "$NSYS_BIN"):$PATH"
 nsys --version
 ffmpeg -version
 nvcc --version
@@ -229,14 +247,17 @@ PY
 ## 6. 先验证算子与真实 collective
 
 ```bash
-cd /workspace/flashinfer
+set -euo pipefail
+(
+cd ./flashinfer
 python -m pytest tests/comm/test_ulysses_lowp.py tests/comm/test_ulysses_lowp_boundary.py -q -ra
 python -m pytest tests/trace/test_template_init.py tests/trace/test_fi_trace_template_consistency.py -k ulysses -q -ra
-mkdir -p /workspace/sm120-gate-work
+)
+mkdir -p ./sm120-gate-work
 
-torchrun --standalone --nproc-per-node=2 benchmarks/comm/validate_ulysses_lowp.py \
+torchrun --standalone --nproc-per-node=2 ./flashinfer/benchmarks/comm/validate_ulysses_lowp.py \
   --local-sequence 129 --used 257 --batch 2 --heads 8 --dtype bfloat16 \
-  --output /workspace/sm120-gate-work/smoke-p2.json
+  --output ./sm120-gate-work/smoke-p2.json
 ```
 
 `validate_ulysses_lowp.py` 检查真实 AllGather/AllToAll 字节、接收布局、scales、有效输出边界、额外 Q slots 不影响输出、Sage 预量化入口和 FP32 SDPA 质量。非零通道要求 cosine≥0.999，relative L1≤stock Sage2 的 1.10 倍；stock 比较排除构造的零通道，Lowp 完整输出必须有限。全零 V 要求输出精确零，不能以 stock 零 amax 行为作为 oracle。失败将写 rank failure 信息并返回非零。
@@ -245,22 +266,21 @@ torchrun --standalone --nproc-per-node=2 benchmarks/comm/validate_ulysses_lowp.p
 
 ```bash
 set -euo pipefail
-cd /workspace/flashinfer
 for p in 2 4 8; do
   for dtype in float16 bfloat16; do
     for l in 1 65 128 129; do
       total=$((p*l))
       for used in 1 $((total-1)) "$total"; do
         # l=1,p=2 时 used=1 重复，跳过已经成功的同一项。
-        result=/workspace/sm120-gate-work/p${p}-${dtype}-l${l}-u${used}.json
+        result=./sm120-gate-work/p${p}-${dtype}-l${l}-u${used}.json
         if test -f "$result"; then continue; fi
-        torchrun --standalone --nproc-per-node="$p" benchmarks/comm/validate_ulysses_lowp.py \
+        torchrun --standalone --nproc-per-node="$p" ./flashinfer/benchmarks/comm/validate_ulysses_lowp.py \
           --local-sequence "$l" --used "$used" --batch 2 --heads 8 --dtype "$dtype" --output "$result"
       done
     done
-    torchrun --standalone --nproc-per-node="$p" benchmarks/comm/validate_ulysses_lowp.py \
+    torchrun --standalone --nproc-per-node="$p" ./flashinfer/benchmarks/comm/validate_ulysses_lowp.py \
       --local-sequence 65 --used 1 --batch 2 --heads 8 --dtype "$dtype" --zero-v \
-      --output /workspace/sm120-gate-work/p${p}-${dtype}-zero-v.json
+      --output ./sm120-gate-work/p${p}-${dtype}-zero-v.json
   done
 done
 ```
@@ -285,14 +305,15 @@ python/sglang/multimodal_gen/benchmarks/ulysses_lowp/
 ```
 
 ```bash
-cd /workspace
-H3_BENCH=/workspace/sglang-lowp-fi/python/sglang/multimodal_gen/benchmarks/ulysses_lowp
+H3_BENCH=./sglang-lowp-fi/python/sglang/multimodal_gen/benchmarks/ulysses_lowp
 python "$H3_BENCH/test_instrumentation.py"
 python "$H3_BENCH/run.py" \
-  --model-path /models/MiniMax-H3 --up 8 --port 30041 \
-  --output /workspace/results-sm120-up8 \
-  --scratch /workspace/work-sm120-up8
+  --model-path ./models/MiniMax-H3 --up 8 --port 30041 \
+  --output ./results-sm120-up8 \
+  --scratch ./work-sm120-up8
 ```
+
+`--model-path`、`--output`、`--scratch` 和 `--baseline-videos` 均可使用相对于项目根目录的路径。采集器会在子进程切换工作目录前解析模型位置；不需要为不同机器修改源码。
 
 脚本顺序运行 Lowp、Sage2 CUDA、BF16：每种后端独立视频服务预热后生成三组 50-step 视频，再独立 profile 服务预热后采集 case1 的 3-step trace。视频关闭 NVTX/profiler；profile 开启 CUDA/NVTX 和 layerwise markers。`--mode videos` / `--mode timelines` 可分开运行，使用同一批 output/scratch 配对。默认每 UP 三份 trace，不为三个 prompt 各采三份。
 
@@ -303,11 +324,11 @@ SM120 的 stock Sage 本来就走 CUDA per-warp，但插桩仍显式强制并标
 ## 8. 分析、结果检查与保留
 
 ```bash
-H3_BENCH=/workspace/sglang-lowp-fi/python/sglang/multimodal_gen/benchmarks/ulysses_lowp
+H3_BENCH=./sglang-lowp-fi/python/sglang/multimodal_gen/benchmarks/ulysses_lowp
 python "$H3_BENCH/analyze_results.py" \
-  --up 8 --output /workspace/results-sm120-up8 \
-  --scratch /workspace/work-sm120-up8 \
-  --baseline-videos /workspace/reference-sm90/videos
+  --up 8 --output ./results-sm120-up8 \
+  --scratch ./work-sm120-up8 \
+  --baseline-videos ./reference-sm90/videos
 ```
 
 未复制参考视频时省略 `--baseline-videos`。新报告首先用 **本机新生成 BF16** 对照本机 Sage2 CUDA / Lowp；指定的旧参考只增加 Lowp 的跨批次 SSIM 与解码比较。SM90/SM120 量化粒度及 attention 累加方式不同，跨架构不要求视频逐字节相同；不能把跨架构画面变化直接归因于回归。
@@ -339,6 +360,7 @@ SQLite、CSV、请求状态、临时日志和 gate JSON 都位于独立 scratch�
 | 最新 SM90 E2E 视频 | 三组新旧 Lowp 全帧逐字节一致；本机 BF16 / Sage2 CUDA / Lowp 各三组已采集 |
 | 最新 SM90 profile | 三份 3-step trace，8 GPU，100 次 attention / GPU |
 | 新的可移植工具 | SM120-only 扩展 mock 路由通过；SM90 实际 Sage 调用通过；现有三份 trace 重新解析得到相同耗时与分类 |
+| 相对路径 | 临时项目根目录下的 CLI 回归通过：相对模型路径在预检/服务切换 cwd 前解析，结果与 scratch 仍归属启动目录 |
 | 预检进程隔离 | 8×H20 实测通过：子进程记录全部设备后退出，协调进程未导入 Torch，GPU 进程列表为空 |
 | 新工具的完整报表流程 | 复用已发布 SM90 测量与原始媒体验证，未将该检查记为新的性能实验 |
 | SM120 实际 GPU | 尚未执行，按本手册分层验收 |
