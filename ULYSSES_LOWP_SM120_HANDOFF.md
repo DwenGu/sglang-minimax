@@ -6,7 +6,7 @@
 
 | 仓库 | 分支 | 本次执行代码快照 |
 |---|---|---|
-| [DwenGu/flashinfer](https://github.com/DwenGu/flashinfer/tree/feat/ulysses-lowp-boundary-first) | `feat/ulysses-lowp-boundary-first` | `1c8283228b97c1ce575cf3815d822f640eb40e4f` |
+| [DwenGu/flashinfer](https://github.com/DwenGu/flashinfer/tree/feat/ulysses-lowp-sage2) | `feat/ulysses-lowp-sage2` | `1c8283228b97c1ce575cf3815d822f640eb40e4f` |
 | [DwenGu/sglang-minimax](https://github.com/DwenGu/sglang-minimax/tree/feat/minimax-h3-ulysses-lowp-boundary-first) | `feat/minimax-h3-ulysses-lowp-boundary-first` | `d6654000274cb20ba6c1a29cbbb31c94d01f4fd1` |
 | [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention/tree/d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5) | 固定版本，未修改 | `d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5`，包版本 2.2.0 |
 
@@ -166,7 +166,7 @@ docker run -it --name h3-sm120 --gpus all --ipc=host --network=host \
 ```bash
 set -euo pipefail
 cd /workspace
-git clone --branch feat/ulysses-lowp-boundary-first https://github.com/DwenGu/flashinfer.git flashinfer
+git clone --branch feat/ulysses-lowp-sage2 https://github.com/DwenGu/flashinfer.git flashinfer
 git -C flashinfer checkout 1c8283228b97c1ce575cf3815d822f640eb40e4f
 git -C flashinfer submodule update --init --recursive
 
