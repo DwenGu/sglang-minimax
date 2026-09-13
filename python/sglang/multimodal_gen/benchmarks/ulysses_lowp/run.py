@@ -15,7 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = Path("results")
 SCRATCH = Path("work")
-MODEL_PATH = "/models/MiniMax-H3"
+MODEL_PATH = "./models/MiniMax-H3"
 PORT = 30041
 PROMPTS = [
     "A hummingbird hovering beside a bright red hibiscus flower, wings blurred in slow motion, macro close-up, sunlit garden background",
@@ -270,7 +270,8 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["all", "videos", "timelines"], default="all")
     args = parser.parse_args()
     ROOT, SCRATCH = args.output.resolve(), args.scratch.resolve()
-    MODEL_PATH, PORT = args.model_path, args.port
+    # Resolve relative to the caller before probe/server subprocesses change cwd.
+    MODEL_PATH, PORT = str(Path(args.model_path).expanduser().resolve()), args.port
     if ROOT == SCRATCH or ROOT in SCRATCH.parents or SCRATCH in ROOT.parents:
         parser.error("output and scratch must be separate, non-nested directories")
     for folder in ["videos", "timelines"]:

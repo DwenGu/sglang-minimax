@@ -5,11 +5,45 @@ import runpy
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 
 class InstrumentationTest(unittest.TestCase):
+    def test_relative_model_path_survives_subprocess_cwd(self):
+        script = Path(__file__).resolve().parent / "run.py"
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for backend in ["bf16", "sage2", "lowp"]:
+                for mode in ["video", "trace"]:
+                    work = root / "work" / f"up8_{backend}_{mode}"
+                    work.mkdir(parents=True)
+                    (work / "done.json").write_text("[]")
+
+            def probe(command, **kwargs):
+                self.assertEqual(command[3], str(root / "models/MiniMax-H3"))
+                self.assertEqual(kwargs["cwd"], script.parent)
+                Path(command[-1]).write_text("{}")
+
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [str(script), "--output", "./results", "--scratch", "./work"],
+                    ),
+                    patch("subprocess.run", side_effect=probe) as child,
+                ):
+                    result = runpy.run_path(str(script), run_name="__main__")
+                child.assert_called_once()
+                self.assertEqual(result["ROOT"], root / "results")
+                self.assertEqual(result["SCRATCH"], root / "work")
+            finally:
+                os.chdir(previous)
+
     def test_architecture_specific_extension(self):
         for arch in ["sm89", "sm90"]:
             with self.subTest(extension=arch):
