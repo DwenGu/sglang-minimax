@@ -24,6 +24,46 @@ PROMPTS = [
 ]
 
 
+def collect_environment(model_path, up):
+    """Probe in a short-lived child so the coordinator owns no CUDA context."""
+    import flashinfer
+    import flashinfer.comm.ulysses_lowp as lowp
+    import sageattention
+    import torch
+
+    import sglang
+
+    caps = [
+        torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())
+    ]
+    if len(caps) != 8 or len(set(caps)) != 1 or caps[0] not in [(9, 0), (12, 0)]:
+        raise RuntimeError(f"Requires 8 visible homogeneous SM90 or SM120 GPUs: {caps}")
+    if not lowp.capability("cuda")["supported"]:
+        raise RuntimeError("FlashInfer layout is unavailable")
+    packages = {}
+    for module in [flashinfer, sageattention, sglang]:
+        location = Path(module.__file__).resolve()
+        repo = next(p for p in location.parents if (p / ".git").exists())
+        packages[module.__name__] = dict(
+            file=str(location),
+            head=subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip(),
+            status=subprocess.check_output(
+                ["git", "-C", str(repo), "status", "--porcelain"], text=True
+            ),
+        )
+    return dict(
+        torch=torch.__version__,
+        cuda=torch.version.cuda,
+        devices=[torch.cuda.get_device_name(i) for i in range(8)],
+        capabilities=caps,
+        packages=packages,
+        model_path=model_path,
+        up=up,
+    )
+
+
 def run_group(up, backend, label, trace=False, *, trace_steps=4):
     name = f"up{up}_{label}_" + ("trace" if trace else "video")
     work = SCRATCH / name
@@ -236,44 +276,23 @@ if __name__ == "__main__":
     for folder in ["videos", "timelines"]:
         (ROOT / folder).mkdir(parents=True, exist_ok=True)
     SCRATCH.mkdir(parents=True, exist_ok=True)
-    import flashinfer
-    import flashinfer.comm.ulysses_lowp as lowp
-    import sageattention
-    import torch
-
-    import sglang
-
-    caps = [
-        torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())
-    ]
-    if len(caps) != 8 or len(set(caps)) != 1 or caps[0] not in [(9, 0), (12, 0)]:
-        raise RuntimeError(f"Requires 8 visible homogeneous SM90 or SM120 GPUs: {caps}")
-    if not lowp.capability("cuda")["supported"]:
-        raise RuntimeError("FlashInfer layout is unavailable")
-    packages = {}
-    for module in [flashinfer, sageattention, sglang]:
-        location = Path(module.__file__).resolve()
-        repo = next(p for p in location.parents if (p / ".git").exists())
-        packages[module.__name__] = dict(
-            file=str(location),
-            head=subprocess.check_output(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
-            ).strip(),
-            status=subprocess.check_output(
-                ["git", "-C", str(repo), "status", "--porcelain"], text=True
-            ),
-        )
-    environment = dict(
-        torch=torch.__version__,
-        cuda=torch.version.cuda,
-        devices=[torch.cuda.get_device_name(i) for i in range(8)],
-        capabilities=caps,
-        packages=packages,
-        model_path=MODEL_PATH,
-        up=args.up,
+    probe_path = SCRATCH / "environment-check.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json,sys; from pathlib import Path; from run import collect_environment; "
+            "Path(sys.argv[3]).write_text(json.dumps(collect_environment(sys.argv[1], int(sys.argv[2])), indent=2))",
+            MODEL_PATH,
+            str(args.up),
+            str(probe_path),
+        ],
+        cwd=HERE,
+        check=True,
     )
+    encoded = probe_path.read_text()
+    probe_path.unlink()
     environment_path = SCRATCH / "environment.json"
-    encoded = json.dumps(environment, indent=2)
     if environment_path.exists() and environment_path.read_text() != encoded:
         raise RuntimeError("Environment differs from existing scratch; use a new batch")
     environment_path.write_text(encoded)
