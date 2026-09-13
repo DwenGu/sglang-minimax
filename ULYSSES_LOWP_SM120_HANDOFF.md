@@ -7,10 +7,10 @@
 | 仓库 | 分支 | 本次执行代码快照 |
 |---|---|---|
 | [DwenGu/flashinfer](https://github.com/DwenGu/flashinfer/tree/feat/ulysses-lowp-boundary-first) | `feat/ulysses-lowp-boundary-first` | `1c8283228b97c1ce575cf3815d822f640eb40e4f` |
-| [DwenGu/sglang-minimax](https://github.com/DwenGu/sglang-minimax/tree/feat/minimax-h3-ulysses-lowp-boundary-first) | `feat/minimax-h3-ulysses-lowp-boundary-first` | `72e138983c3e90f946abc4f4230d96528a623972` |
+| [DwenGu/sglang-minimax](https://github.com/DwenGu/sglang-minimax/tree/feat/minimax-h3-ulysses-lowp-boundary-first) | `feat/minimax-h3-ulysses-lowp-boundary-first` | `d6654000274cb20ba6c1a29cbbb31c94d01f4fd1` |
 | [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention/tree/d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5) | 固定版本，未修改 | `d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5`，包版本 2.2.0 |
 
-SGLang 分支在执行快照之后追加本交接文档，并按 isort 规范补充一个 import 分组空行；执行代码以表中的 SHA 为准。两个功能分支保留已有功能历史，不覆盖 main，也没有合入 main 后续无关更新。FlashInfer 基于此前 `481cb83a`，SGLang 基于此前 `6215b598e`。
+SGLang 分支在执行快照之后只更新本交接文档；执行代码以表中的 SHA 为准。此前按 isort 规范补充的一个 import 分组空行已确认不改变 Python AST。两个功能分支保留已有功能历史，不覆盖 main，也没有合入 main 后续无关更新。FlashInfer 基于此前 `481cb83a`，SGLang 基于此前 `6215b598e`。
 
 | 新提交 | 内容 |
 |---|---|
@@ -18,8 +18,10 @@ SGLang 分支在执行快照之后追加本交接文档，并按 isort 规范补
 | FlashInfer `1c828322` | torchrun 真实 collective / Sage 验收器，更新 benchmark 与数值契约文档 |
 | SGLang `3b5450de6` | consumer 的 scale 宽度统一从 FlashInfer layout 获取 |
 | SGLang `72e138983` | 可移植视频请求、50/3-step 采集、SM90/SM120 NVTX 路由与功能分类分析脚本 |
+| SGLang `05f52857d` | 中文交接手册与 import 分组空行 |
+| SGLang `d66540002` | 预检放到子进程，避免协调进程持有 CUDA 上下文、阻塞 GPU 清理 |
 
-提交前确认：相对于原 HEAD 的既有 tracked diff，与最新 SM90 视频报告记录的 SHA-256 一致。FlashInfer 为 `e3757e774aede56e561a1d833a4d0ce91525cc803cc32638f6d70d1064952094`，SGLang 为 `463dd2e8857b82a0644e21769a16869661879e67abfefe21abad217a49fadbc2`。该比较排除了当时尚未跟踪的两个新增测试/验收文件；生产修改与视频批次相同。新增的移植采集脚本另做了路由与解析验证，未宣称已在 SM120 跑通。
+提交前确认：FlashInfer 完整提交及 SGLang `3b5450de6` 相对于原 HEAD 的既有 tracked diff，与最新 SM90 视频报告记录的 SHA-256 一致。FlashInfer 为 `e3757e774aede56e561a1d833a4d0ce91525cc803cc32638f6d70d1064952094`，SGLang 为 `463dd2e8857b82a0644e21769a16869661879e67abfefe21abad217a49fadbc2`。该比较排除了当时尚未跟踪的两个新增测试/验收文件；生产修改与视频批次相同。新增的移植采集脚本另做了路由与解析验证，未宣称已在 SM120 跑通。
 
 ## 2. 方案与执行链
 
@@ -169,7 +171,8 @@ git -C flashinfer checkout 1c8283228b97c1ce575cf3815d822f640eb40e4f
 git -C flashinfer submodule update --init --recursive
 
 git clone --branch feat/minimax-h3-ulysses-lowp-boundary-first https://github.com/DwenGu/sglang-minimax.git sglang-lowp-fi
-git -C sglang-lowp-fi checkout 72e138983c3e90f946abc4f4230d96528a623972
+# 保留分支最新手册，同时核验其他文件与固定快照相同。
+git -C sglang-lowp-fi diff --exit-code d6654000274cb20ba6c1a29cbbb31c94d01f4fd1 HEAD -- . ':!ULYSSES_LOWP_SM120_HANDOFF.md'
 
 git clone https://github.com/thu-ml/SageAttention.git SageAttention-stock
 git -C SageAttention-stock checkout d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
@@ -295,7 +298,7 @@ python "$H3_BENCH/run.py" \
 
 SM120 的 stock Sage 本来就走 CUDA per-warp，但插桩仍显式强制并标记此路线；只导入当前已编译扩展，避免只装 SM120 时强制导入 `_qattn_sm90`。Lowp 使用 SM120 Sage f16 accumulation 入口。不要将 SM90 的 Q16/K128 kernel 名或 V padding 宽度用于判断 SM120。
 
-`run.py` 会记录 GPU、Torch/CUDA、源码 import path、git HEAD/status 到 scratch 的 `environment.json`，并拒绝覆盖已有最终媒体。已成功组有 `done.json` 可跳过；失败组不会自动当作完成。重新测量请使用新的 output/scratch，不复用参考视频目录。脚本端口须空闲；不要并行启动多个占满 8 GPU 的批次。
+`run.py` 在短生命周期子进程中预检并记录 GPU、Torch/CUDA、源码 import path、git HEAD/status 到 scratch 的 `environment.json`；子进程退出后再开始采集，协调进程不持有 CUDA 上下文，并拒绝覆盖已有最终媒体。已成功组有 `done.json` 可跳过；失败组不会自动当作完成。重新测量请使用新的 output/scratch，不复用参考视频目录。脚本端口须空闲；不要并行启动多个占满 8 GPU 的批次。
 
 ## 8. 分析、结果检查与保留
 
@@ -336,6 +339,7 @@ SQLite、CSV、请求状态、临时日志和 gate JSON 都位于独立 scratch�
 | 最新 SM90 E2E 视频 | 三组新旧 Lowp 全帧逐字节一致；本机 BF16 / Sage2 CUDA / Lowp 各三组已采集 |
 | 最新 SM90 profile | 三份 3-step trace，8 GPU，100 次 attention / GPU |
 | 新的可移植工具 | SM120-only 扩展 mock 路由通过；SM90 实际 Sage 调用通过；现有三份 trace 重新解析得到相同耗时与分类 |
+| 预检进程隔离 | 8×H20 实测通过：子进程记录全部设备后退出，协调进程未导入 Torch，GPU 进程列表为空 |
 | 新工具的完整报表流程 | 复用已发布 SM90 测量与原始媒体验证，未将该检查记为新的性能实验 |
 | SM120 实际 GPU | 尚未执行，按本手册分层验收 |
 
