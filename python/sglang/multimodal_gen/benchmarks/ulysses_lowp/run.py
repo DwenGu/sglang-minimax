@@ -27,9 +27,9 @@ PROMPTS = [
 def collect_environment(model_path, up):
     """Probe in a short-lived child so the coordinator owns no CUDA context."""
     import flashinfer
-    import flashinfer.comm.ulysses_lowp as lowp
     import sageattention
     import torch
+    from flashinfer.comm import UlyssesCommunicator
 
     import sglang
 
@@ -38,8 +38,12 @@ def collect_environment(model_path, up):
     ]
     if len(caps) != 8 or len(set(caps)) != 1 or caps[0] not in [(9, 0), (12, 0)]:
         raise RuntimeError(f"Requires 8 visible homogeneous SM90 or SM120 GPUs: {caps}")
-    if not lowp.capability("cuda")["supported"]:
-        raise RuntimeError("FlashInfer layout is unavailable")
+    if not all(
+        callable(getattr(UlyssesCommunicator, method, None))
+        for method in ("prepare_qkv", "scatter_qkv")
+    ):
+        raise RuntimeError("FlashInfer prepared QKV API is unavailable")
+    # The server validates and compiles the layout collectively in prepare_qkv.
     packages = {}
     for module in [flashinfer, sageattention, sglang]:
         location = Path(module.__file__).resolve()

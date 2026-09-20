@@ -12,7 +12,7 @@ import os
 import struct
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from typing import Any, Callable
 
 import torch
@@ -2200,6 +2200,59 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             if isinstance(module, MiniMaxH3Attention):
                 module._set_attention_backend(backend)
         self._resolved_attention_backend = backend.get_enum()
+
+    def prepare_ulysses_attention(self, *, sequence_length, packed_seq_params, device):
+        """Prepare Lowp input communication once around a complete request.
+
+        All Ulysses ranks must enter/exit the returned context together. Direct
+        model callers use this same context; forward never prepares collectives.
+        """
+        self._resolve_attention_backend_once()
+        world_size, _ = get_ulysses_ctx()
+        ring_size, _ = get_ring_ctx()
+        if (
+            self._resolved_attention_backend
+            is not AttentionBackendEnum.ULYSSES_LOWP_V2G
+            or world_size not in (2, 4, 8)
+            or ring_size != 1
+        ):
+            return nullcontext()
+        bounds = packed_seq_params["cu_seqlens_q_host"]
+        used = packed_seq_params["max_seqlen_q"]
+        if (
+            len(bounds) != 3
+            or bounds[0] != 0
+            or bounds[1] != used
+            or bounds[2] != sequence_length
+            or not 0 < used <= sequence_length
+        ):
+            return nullcontext()
+        if sequence_length % world_size:
+            raise ValueError("Packed sequence must be divisible by Ulysses world size")
+        impls = [
+            module._attention_impl
+            for module in self.modules()
+            if isinstance(module, MiniMaxH3Attention)
+            and module.prefix.startswith("blocks.")
+        ]
+        if not impls:
+            return nullcontext()
+        from sglang.multimodal_gen.runtime.layers.attention.backends.ulysses_lowp_v2g import (
+            prepare_ulysses_qkv,
+        )
+
+        return prepare_ulysses_qkv(
+            impls,
+            qkv_shape=(
+                1,
+                sequence_length // world_size,
+                self.num_attention_heads // get_tp_world_size(),
+                self.arch.attention_head_dim,
+            ),
+            used_sequence=used,
+            dtype=_BF16_DTYPE,
+            device=device,
+        )
 
     def _mark_missing_params_required(self) -> None:
         for _, param in self.named_parameters():

@@ -551,60 +551,74 @@ def minimax_h3_denoise_loop(
     audio_one_minus_sigma_ratios = 1.0 - audio_sigma_ratios
     video_denoised_scratch = torch.empty_like(video_rows[video_target_slice])
     audio_denoised_scratch = torch.empty_like(audio_rows[audio_target_slice])
-    for step in range(num_steps):
-        step_cm = step_profiler(step) if step_profiler is not None else nullcontext()
-        with step_cm:
-            s_v = sigmas_video[step]
-            s_a = sigmas_audio[step]
-
-            fk = positive.forward_kwargs(
-                video_rows=video_rows,
-                audio_rows=audio_rows,
-                step_timesteps=timestep_plan[step],
+    prepare_attention = getattr(model, "prepare_ulysses_attention", None)
+    attention_cm = (
+        nullcontext()
+        if prepare_attention is None
+        else prepare_attention(
+            sequence_length=positive.seq_len,
+            packed_seq_params=positive.static_kwargs["packed_seq_params"],
+            device=device,
+        )
+    )
+    # Prepare once on every rank; layers and diffusion steps share the buffers.
+    with attention_cm:
+        for step in range(num_steps):
+            step_cm = (
+                step_profiler(step) if step_profiler is not None else nullcontext()
             )
-            if attn_metadata is not None:
-                attn_metadata.current_timestep = step
-            if model_forward is None and attn_metadata is not None:
-                forward_cm: AbstractContextManager = set_forward_context(
-                    current_timestep=step,
-                    attn_metadata=attn_metadata,
+            with step_cm:
+                s_v = sigmas_video[step]
+                s_a = sigmas_audio[step]
+
+                fk = positive.forward_kwargs(
+                    video_rows=video_rows,
+                    audio_rows=audio_rows,
+                    step_timesteps=timestep_plan[step],
                 )
-            else:
-                forward_cm = nullcontext()
-            with forward_cm, torch.inference_mode():
-                if model_forward is None:
-                    v_video, v_audio = model(**fk)
+                if attn_metadata is not None:
+                    attn_metadata.current_timestep = step
+                if model_forward is None and attn_metadata is not None:
+                    forward_cm: AbstractContextManager = set_forward_context(
+                        current_timestep=step,
+                        attn_metadata=attn_metadata,
+                    )
                 else:
-                    v_video, v_audio = model_forward(model, fk, step)
-                # The model outputs are inference tensors. Keep their disposable
-                # fp32 velocity updates in the same context so ``out=velocity``
-                # can reuse the output storage without an extra clone.
-                mv_video_t = v_video.float()
-                mv_audio_t = v_audio[audio_target_slice].float()
+                    forward_cm = nullcontext()
+                with forward_cm, torch.inference_mode():
+                    if model_forward is None:
+                        v_video, v_audio = model(**fk)
+                    else:
+                        v_video, v_audio = model_forward(model, fk, step)
+                    # The model outputs are inference tensors. Keep their disposable
+                    # fp32 velocity updates in the same context so ``out=velocity``
+                    # can reuse the output storage without an extra clone.
+                    mv_video_t = v_video.float()
+                    mv_audio_t = v_audio[audio_target_slice].float()
 
-                video_target = video_rows[video_target_slice]
-                _minimax_h3_update_target_rows_(
-                    video_target,
-                    mv_video_t,
-                    sigma_t=video_sigma_t[step],
-                    sigma_curr=s_v,
-                    sigma_ratio=video_sigma_ratios[step],
-                    one_minus_sigma_ratio=video_one_minus_sigma_ratios[step],
-                    denoised_scratch=video_denoised_scratch,
-                )
+                    video_target = video_rows[video_target_slice]
+                    _minimax_h3_update_target_rows_(
+                        video_target,
+                        mv_video_t,
+                        sigma_t=video_sigma_t[step],
+                        sigma_curr=s_v,
+                        sigma_ratio=video_sigma_ratios[step],
+                        one_minus_sigma_ratio=video_one_minus_sigma_ratios[step],
+                        denoised_scratch=video_denoised_scratch,
+                    )
 
-                audio_target = audio_rows[audio_target_slice]
-                _minimax_h3_update_target_rows_(
-                    audio_target,
-                    mv_audio_t,
-                    sigma_t=audio_sigma_t[step],
-                    sigma_curr=s_a,
-                    sigma_ratio=audio_sigma_ratios[step],
-                    one_minus_sigma_ratio=audio_one_minus_sigma_ratios[step],
-                    denoised_scratch=audio_denoised_scratch,
-                )
-            if on_step is not None:
-                on_step(step, video_rows, audio_rows)
+                    audio_target = audio_rows[audio_target_slice]
+                    _minimax_h3_update_target_rows_(
+                        audio_target,
+                        mv_audio_t,
+                        sigma_t=audio_sigma_t[step],
+                        sigma_curr=s_a,
+                        sigma_ratio=audio_sigma_ratios[step],
+                        one_minus_sigma_ratio=audio_one_minus_sigma_ratios[step],
+                        denoised_scratch=audio_denoised_scratch,
+                    )
+                if on_step is not None:
+                    on_step(step, video_rows, audio_rows)
 
     return video_rows, audio_rows
 

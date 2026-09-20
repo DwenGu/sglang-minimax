@@ -145,16 +145,12 @@ class _SlidingTileAttentionBackendResolver(_CudaAttentionBackendResolver):
 
 
 class _UlyssesLowpV2GBackendResolver(_CudaAttentionBackendResolver):
-    """Low-precision Ulysses A2A for MiniMax-H3 on SM120: quantization from
-    flashinfer.comm.ulysses_lowp, attention from stock SageAttention's SM89
-    binding.  Falls back to plain SageAttention2 when either is missing."""
+    """Prepared FlashInfer QKV exchange with stock SageAttention2."""
 
     backend = AttentionBackendEnum.ULYSSES_LOWP_V2G
 
     @classmethod
     def resolve(cls, platform) -> str | AttentionBackendEnum:
-        # SM120/SM89 go through the module-level flashinfer API; SM90 (Hopper)
-        # has its own JIT module and layout class (deployment doc 7.3 step 1).
         if not (platform.is_sm120() or platform.is_hopper()):
             logger.info(
                 "ulysses_lowp_v2g requires an SM120 or SM90 device. "
@@ -162,25 +158,19 @@ class _UlyssesLowpV2GBackendResolver(_CudaAttentionBackendResolver):
             )
             return AttentionBackendEnum.SAGE_ATTN
         try:
-            import flashinfer.comm.ulysses_lowp as lowp
+            from flashinfer.comm import UlyssesCommunicator
 
+            if not all(
+                hasattr(UlyssesCommunicator, method)
+                for method in ("prepare_qkv", "scatter_qkv")
+            ):
+                raise ImportError("FlashInfer prepared QKV API is unavailable")
             if platform.is_hopper():
                 from sageattention import _qattn_sm90  # noqa: F401
-
-                # The module-level capability() whitelist is {(8,9),(12,0)} and
-                # always reports unsupported on (9,0); the SM90 layout class is
-                # the authoritative probe for this arch.
-                if not lowp.UlyssesLowpSageLayoutSM90().is_supported():
-                    raise ImportError(
-                        "flashinfer.comm.ulysses_lowp SM90 layout unsupported"
-                    )
             else:
                 from sageattention import _qattn_sm89  # noqa: F401
-
-                if not lowp.capability("cuda").get("supported"):
-                    raise ImportError(
-                        "flashinfer.comm.ulysses_lowp payload ABI v3 unsupported"
-                    )
+            # Layout/JIT admission is collective in prepare_qkv. A local
+            # compile failure here must not send only one rank to Sage fallback.
             from sglang.multimodal_gen.runtime.layers.attention.backends.ulysses_lowp_v2g import (  # noqa: F401
                 UlyssesLowpV2GBackend,
             )

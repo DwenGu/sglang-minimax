@@ -1,37 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Low-precision Ulysses all-to-all attention for MiniMax-H3 (V2-G).
+"""Low-precision Ulysses attention using FlashInfer's prepared QKV API.
 
-Quantizes Q/K to INT8 and V to FP8 on SageAttention2's GLOBAL 32/64-token
-grids BEFORE the sequence->head all-to-all, so the exchange moves ~half the
-bytes of the BF16 path, and the receiver hands the pre-quantized operands
-straight to SageAttention's SM120 kernel.  Every quantization primitive comes
-from ``flashinfer.comm.ulysses_lowp``; the attention kernel is the stock
-SageAttention ``_qattn_sm89`` binding (no fork, no patch).
-
-Routing is decided by the packed-sequence padding alone: ``flashinfer``
-picks stats protocol 3 (ALIGN-128 fast path) when the local shard is a whole
-number of 128-token blocks and protocol 2 (boundary machinery) otherwise --
-both produce byte-identical payloads wherever both are legal.  Pad the packed
-global sequence to ``flashinfer.comm.ulysses_lowp.required_alignment(P, 3)``
-(``SGLANG_MINIMAX_H3_PACKED_ALIGNMENT=128*P``) to take the fast path.
-
-Non-Ulysses calls and any request the route guards decline run plain
-SageAttention2 (inherited BF16 path).  All guards read rank-uniform state, so
-the whole Ulysses group makes the same decision without a collective.
+The H3 request prepares one communicator/workspace shared by its serialized
+attention layers. FlashInfer owns statistics, quantization and input exchange;
+stock SageAttention2 consumes the encoded result. The framework keeps its
+existing output All2All and ordinary Sage fallback for unsupported routes.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
+from contextlib import contextmanager
+from dataclasses import dataclass
+from math import prod as math_prod
 
-import flashinfer.comm.ulysses_lowp as lowp
 import torch
-import torch.distributed as dist
-from sageattention import _qattn_sm89
+from flashinfer.comm import UlyssesCommunicator, UlyssesQKV, UlyssesQKVWorkspace
 
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_sp_group,
-    get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (
@@ -42,7 +30,6 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.sage_attn import (
 )
 from sglang.multimodal_gen.runtime.layers.usp import (
     _a2a_staging_buffer,
-    _usp_all_to_all_single,
 )
 from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
 
@@ -53,50 +40,49 @@ _WORLD_SIZES = (2, 4, 8)
 _SAGE_NHD, _SAGE_NON_CAUSAL, _SAGE_PER_WARP, _SAGE_NO_LSE = 0, 0, 2, 0
 
 
-# Layout classes own the quantization grid and consumer scale widths.
-_SM90 = (9, 0)
+@functools.cache
+def _sage_kernel(layout: str):
+    if layout == "sage2_sm90":
+        from sageattention import _qattn_sm90
+
+        return _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf
+    if layout == "sage2_sm89_sm120":
+        from sageattention import _qattn_sm89
+
+        return _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf
+    raise ValueError(f"Unsupported FlashInfer QKV layout: {layout}")
 
 
-class _ArchOps:
-    """Layout object + SageAttention entry for one architecture."""
-
-    __slots__ = ("layout", "attn", "name")
-
-    def __init__(self, layout, attn, name):
-        self.layout = layout
-        self.attn = attn
-        self.name = name
+@dataclass
+class _PreparedQKV:
+    comm: UlyssesCommunicator
+    workspace: UlyssesQKVWorkspace
+    encoded: UlyssesQKV | None = None
 
 
-_ARCH_OPS: _ArchOps | None = None
-
-
-def _arch_ops() -> _ArchOps | None:
-    """Resolve once, lazily -- import time is too early to touch CUDA."""
-    global _ARCH_OPS
-    if _ARCH_OPS is None:
-        if torch.cuda.get_device_capability() == _SM90:
-            # Imported here, not at module scope: SageAttention only builds
-            # _qattn_sm90 when TORCH_CUDA_ARCH_LIST includes 9.0 (setup.py:204),
-            # so a top-level import would make this whole module unimportable on
-            # SM120 -- which the resolver would swallow as a silent fallback.
-            from sageattention import _qattn_sm90
-
-            _ARCH_OPS = _ArchOps(
-                lowp.UlyssesLowpSageLayoutSM90(),
-                # SageAttention's SM90 binding has no f16-accum variant; the f32
-                # one has the identical 12-argument signature and accumulates
-                # more precisely.
-                _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf,
-                "sm90",
-            )
-        else:
-            _ARCH_OPS = _ArchOps(
-                lowp.UlyssesLowpSageLayout(),
-                _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf,
-                "sm120",
-            )
-    return _ARCH_OPS
+@contextmanager
+def prepare_ulysses_qkv(impls, *, qkv_shape, used_sequence, dtype, device):
+    """Collective request preparation; no per-layer cache or initialization."""
+    if any(getattr(impl, "_prepared_qkv", None) is not None for impl in impls):
+        raise RuntimeError("Overlapping requests cannot share a Lowp QKV workspace")
+    with UlyssesCommunicator(
+        get_sp_group().ulysses_group,
+        # The original floating Q/K/V total is a conservative byte budget for
+        # both Sage2 layouts. Preparation allocates only the actual wire size.
+        max_bytes=3 * math_prod(qkv_shape) * dtype.itemsize,
+        dtype=dtype,
+        backend="nccl",
+        device=device,
+    ) as comm:
+        workspace = comm.prepare_qkv(qkv_shape, used_sequence=used_sequence)
+        state = _PreparedQKV(comm, workspace)
+        for impl in impls:
+            impl._prepared_qkv = state
+        try:
+            yield
+        finally:
+            for impl in impls:
+                impl._prepared_qkv = None
 
 
 class UlyssesLowpV2GBackend(AttentionBackend):
@@ -124,6 +110,7 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
     ``None`` to take the regular path."""
 
     _fallback_logged = False
+    _prepared_qkv: _PreparedQKV | None = None
 
     def _route(
         self,
@@ -132,7 +119,7 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
         v: torch.Tensor,
         cu_seqlens_host: tuple[int, ...] | None,
         max_seqlen: int,
-    ) -> tuple[int, int, int] | str:
+    ) -> tuple[int, int] | str:
         if torch.is_grad_enabled() or torch.cuda.is_current_stream_capturing():
             return "eager_only"
         if q.ndim != 3 or q.shape != k.shape or q.shape != v.shape:
@@ -161,7 +148,7 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
             return "cu_seqlens"
         if any(t.stride(-1) != 1 for t in (q, k, v)):
             return "stride"
-        return world_size, get_ulysses_parallel_rank(), int(cu_seqlens_host[1])
+        return world_size, int(cu_seqlens_host[1])
 
     def forward_varlen_ulysses(
         self,
@@ -182,104 +169,45 @@ class UlyssesLowpV2GImpl(SageAttentionImpl):
                     route,
                 )
             return None
-        world_size, rank, used = route
-        ops = _arch_ops()
-        layout = ops.layout
+        world_size, used = route
+        state = self._prepared_qkv
+        if state is None:
+            raise RuntimeError(
+                "Lowp Ulysses must be prepared before attention; use the H3 "
+                "denoise loop or model.prepare_ulysses_attention() on every rank"
+            )
+        if used != state.workspace.used_sequence:
+            raise ValueError(
+                "Request used_sequence differs from the prepared QKV workspace"
+            )
         local_sequence, num_heads, head_dim = q.shape
         local_heads = num_heads // world_size
         global_sequence = local_sequence * world_size
-        device = q.device
-        q4, k4, v4 = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
-
-        with torch.cuda.nvtx.range("lowp_local_stats"):
-            send, ctx = layout.local_stats(
-                q4, k4, v4, rank=rank, world_size=world_size, used_sequence=used
-            )
-            gathered = _a2a_staging_buffer(
-                "lowp_stats_gather", (world_size * send.numel(),), torch.float32, device
-            )
-        with torch.cuda.nvtx.range("lowp_stats_allgather"):
-            dist.all_gather_into_tensor(
-                gathered, send, group=get_sp_group().ulysses_group
-            )
-        with torch.cuda.nvtx.range("lowp_finalize_stats"):
-            stats = layout.finalize_stats(gathered, ctx, k4)
-
-        spec = layout.payload_spec(
-            batch_size=1,
-            local_sequence=local_sequence,
-            num_heads=num_heads,
-            world_size=world_size,
+        state.encoded = state.comm.scatter_qkv(
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            v.unsqueeze(0),
+            workspace=state.workspace,
+            out=state.encoded,
         )
-        with torch.cuda.nvtx.range("lowp_quant_pack"):
-            send_u8 = _a2a_staging_buffer(
-                "lowp_qkv_send",
-                (world_size, int(spec["chunk_bytes"])),
-                torch.uint8,
-                device,
-            )
-            layout.quant_and_pack(q4, k4, v4, stats, out=send_u8)
-        with torch.cuda.nvtx.range("lowp_input_a2a"):
-            recv_u8 = _usp_all_to_all_single(send_u8, role="lowp_qkv_recv")
-
-        with torch.cuda.nvtx.range("lowp_unpack"):
-            q_width, k_width = layout.scale_widths(used)
-            q_int8 = _a2a_staging_buffer(
-                "lowp_q_global",
-                (1, global_sequence, local_heads, head_dim),
-                torch.int8,
-                device,
-            )
-            k_int8 = _a2a_staging_buffer(
-                "lowp_k_global",
-                (1, global_sequence, local_heads, head_dim),
-                torch.int8,
-                device,
-            )
-            v_fp8 = _a2a_staging_buffer(
-                "lowp_v_packed",
-                (1, head_dim, local_heads, int(spec["padded_sequence"])),
-                torch.float8_e4m3fn,
-                device,
-            )
-            q_scale = _a2a_staging_buffer(
-                "lowp_q_scale", (1, local_heads, q_width), torch.float32, device
-            )
-            k_scale = _a2a_staging_buffer(
-                "lowp_k_scale", (1, local_heads, k_width), torch.float32, device
-            )
-            layout.unpack_for_sage(
-                recv_u8,
-                batch_size=1,
-                local_sequence=local_sequence,
-                local_heads=local_heads,
-                world_size=world_size,
-                aligned=None,
-                scale_sequence=used,
-                out=(q_int8, k_int8, v_fp8, q_scale, k_scale),
-            )
-            head_start = rank * local_heads
-            v_scale = stats.v_scale_global[
-                :, head_start : head_start + local_heads
-            ].contiguous()
-
+        encoded = state.encoded
         with torch.cuda.nvtx.range("lowp_sage_attn"):
             out = _a2a_staging_buffer(
                 "lowp_attn_out",
                 (1, global_sequence, local_heads, head_dim),
-                q.dtype,
-                device,
+                encoded.input_dtype,
+                q.device,
             )
             if used < global_sequence:
                 out[:, used:].zero_()
-            ops.attn(
-                q_int8[:, :used],
-                k_int8[:, :used],
-                v_fp8,
+            _sage_kernel(encoded.layout)(
+                encoded.q[:, :used],
+                encoded.k[:, :used],
+                encoded.v,
                 out[:, :used],
-                q_scale,
-                k_scale,
-                v_scale,
+                encoded.q_scale,
+                encoded.k_scale,
+                encoded.v_scale,
                 _SAGE_NHD,
                 _SAGE_NON_CAUSAL,
                 _SAGE_PER_WARP,

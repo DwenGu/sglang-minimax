@@ -361,3 +361,59 @@ def test_grouped_outputs_share_prompt_refinement():
 
     assert model.calls == 1
     assert first.static_kwargs["prompt_embeds"] is second.static_kwargs["prompt_embeds"]
+
+
+@pytest.mark.parametrize("fail_step", [None, 1])
+def test_attention_preparation_spans_request_and_cleans_up(fail_step):
+    from contextlib import contextmanager
+
+    branch = _branch("t2va")
+    events = []
+    active = False
+
+    @contextmanager
+    def prepare(**kwargs):
+        nonlocal active
+        assert kwargs["sequence_length"] == branch.seq_len
+        assert kwargs["packed_seq_params"] is branch.static_kwargs["packed_seq_params"]
+        active = True
+        events.append("prepare")
+        try:
+            yield
+        finally:
+            active = False
+            events.append("close")
+
+    def forward(model, kwargs, step):
+        assert active
+        events.append(step)
+        if step == fail_step:
+            raise RuntimeError("injected step failure")
+        return (
+            torch.zeros(int(branch.update_mask.sum()), 96),
+            torch.zeros(branch.audio_pos.numel(), 32),
+        )
+
+    def run():
+        return minimax_h3_denoise_loop(
+            model=SimpleNamespace(
+                prepare_adaln_plans=lambda _: None,
+                prepare_ulysses_attention=prepare,
+            ),
+            model_forward=forward,
+            positive=branch,
+            initial_video_rows=torch.zeros(branch.img_pos.numel(), 96),
+            initial_audio_rows=torch.zeros(branch.audio_pos.numel(), 32),
+            keyframe_cond_rows=None,
+            sigmas_video=[1.0, 0.5, 0.0],
+            sigmas_audio=[1.0, 0.5, 0.0],
+            device=torch.device("cpu"),
+        )
+
+    if fail_step is None:
+        run()
+    else:
+        with pytest.raises(RuntimeError, match="injected step failure"):
+            run()
+    assert events == ["prepare", 0, 1, "close"]
+    assert not active

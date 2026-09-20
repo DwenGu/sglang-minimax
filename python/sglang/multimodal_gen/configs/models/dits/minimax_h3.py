@@ -12,12 +12,12 @@ def minimax_h3_packed_sequence_alignment() -> int:
     """Multiple the packed sequence length is padded to (zero-filled tail).
 
     Defaults to ``MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT``.  The environment
-    variable ``SGLANG_MINIMAX_H3_PACKED_ALIGNMENT`` overrides it: with the
-    ``ulysses_lowp_v2g`` attention backend, ``128 * ulysses_degree`` makes
-    every sequence-parallel shard a whole number of 128-token blocks and
-    routes the low-precision Ulysses exchange to its ALIGN-128 fast path
-    (see ``flashinfer.comm.ulysses_lowp.required_alignment``).  Read per call
-    so every rank -- and the BCG padder -- sees one value.
+    variable ``SGLANG_MINIMAX_H3_PACKED_ALIGNMENT`` overrides it. For example,
+    ``128 * ulysses_degree`` makes every sequence-parallel shard a whole
+    number of 128-token blocks. This controls padding only: the
+    ``ulysses_lowp_v2g`` backend uses FlashInfer's prepared QKV exchange with
+    boundary statistics for every shard length. Read per call so every
+    rank -- and the BCG padder -- sees one value.
     """
 
     value = os.environ.get("SGLANG_MINIMAX_H3_PACKED_ALIGNMENT")
